@@ -1,5 +1,5 @@
 // FILE: server.js
-// This is the final, most robust version of the proxy server.
+// Final version with official GoFile API support
 
 const express = require('express');
 const axios = require('axios');
@@ -10,12 +10,13 @@ const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 
-// A simple endpoint to check if the server is running
+// Get the GoFile Token from the environment variables for security
+const GOFILE_TOKEN = process.env.GOFILE_TOKEN;
+
 app.get('/', (req, res) => {
-  res.send('WellPlayer Unzipper API is active and running!');
+  res.send('WellPlayer Smart Unzipper API is running!');
 });
 
-// The main proxy endpoint
 app.get('/proxy', async (req, res) => {
   const targetUrl = req.query.url;
 
@@ -23,63 +24,70 @@ app.get('/proxy', async (req, res) => {
     return res.status(400).send('Error: "url" query parameter is required.');
   }
 
-  console.log(`[${new Date().toISOString()}] - Attempting to proxy: ${targetUrl}`);
-
-  try {
-    // Make the request look as much like a real browser as possible
-    const response = await axios({
-      method: 'get',
-      url: targetUrl,
-      responseType: 'stream',
-      timeout: 60000, // Increased timeout to 60 seconds for large files
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
-        'Referer': targetUrl, // Act like the request is coming from the site itself
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Accept-Language': 'en-US,en;q=0.9'
-      }
-    });
-    
-    console.log(`[${new Date().toISOString()}] - Successfully connected. Streaming response...`);
-
-    // Pass the original headers from the target server back to the client
-    res.setHeader('Content-Type', response.headers['content-type'] || 'application/octet-stream');
-    if (response.headers['content-length']) {
-      res.setHeader('Content-Length', response.headers['content-length']);
+  // --- GoFile Specific Logic ---
+  if (targetUrl.includes('gofile.io/d/')) {
+    if (!GOFILE_TOKEN) {
+        return res.status(500).send('GoFile API token is not configured on the server.');
     }
-     if (response.headers['content-disposition']) {
-        res.setHeader('Content-Disposition', response.headers['content-disposition']);
-    }
-    
-    // Pipe the file stream from the target server directly to the user
-    response.data.pipe(res);
 
-    response.data.on('error', (err) => {
-        console.error(`[${new Date().toISOString()}] - Stream error:`, err.message);
-        if (!res.headersSent) {
-            res.status(500).send('Error during file stream.');
+    const contentId = targetUrl.split('/').pop();
+    console.log(`[GoFile] Detected GoFile link. Content ID: ${contentId}`);
+
+    try {
+      // 1. Call the GoFile API to get the file details
+      const apiResponse = await axios.get(`https://api.gofile.io/getContent?contentId=${contentId}`, {
+        headers: {
+          'Authorization': `Bearer ${GOFILE_TOKEN}`
         }
-        res.end();
-    });
+      });
 
-  } catch (error) {
-    console.error(`[${new Date().toISOString()}] - Proxy Error: ${error.message}`);
-    if (error.response) {
-      // The request was made and the server responded with a status code
-      // that falls out of the range of 2xx
-      console.error('Error Data:', error.response.data);
-      console.error('Error Status:', error.response.status);
-      console.error('Error Headers:', error.response.headers);
-      res.status(error.response.status).send(`Target server responded with error: ${error.response.status}`);
-    } else if (error.request) {
-      // The request was made but no response was received
-      console.error('Error Request:', error.request);
-      res.status(504).send('No response received from target server. It may be down or blocking the proxy.');
-    } else {
-      // Something happened in setting up the request that triggered an Error
-      console.error('Error Message:', error.message);
-      res.status(500).send(`Error setting up the request: ${error.message}`);
+      if (apiResponse.data.status !== 'ok') {
+        throw new Error(apiResponse.data.data.message || 'GoFile API returned an error.');
+      }
+      
+      // 2. Find the direct download link from the response
+      // We need to get the 'directLink' for the specific file inside the folder
+      const contents = apiResponse.data.data.contents;
+      const firstFileKey = Object.keys(contents)[0];
+      const directLink = contents[firstFileKey].directLink;
+
+      if (!directLink) {
+        throw new Error('Could not find a direct download link in the GoFile API response.');
+      }
+      
+      console.log(`[GoFile] Found direct link: ${directLink}`);
+
+      // 3. Fetch the file from the direct link
+      const fileResponse = await axios({
+        method: 'get',
+        url: directLink,
+        responseType: 'stream',
+        headers: { 'User-Agent': 'Mozilla/5.0' }
+      });
+
+      res.setHeader('Content-Type', fileResponse.headers['content-type'] || 'application/zip');
+      fileResponse.data.pipe(res);
+
+    } catch (error) {
+      console.error('[GoFile] Error:', error.message);
+      res.status(502).send(`Error processing GoFile link: ${error.message}`);
+    }
+
+  } else {
+    // --- Fallback for other generic URLs ---
+    console.log(`[Generic] Attempting to proxy: ${targetUrl}`);
+    try {
+      const response = await axios({
+        method: 'get',
+        url: targetUrl,
+        responseType: 'stream',
+        headers: { 'User-Agent': 'Mozilla/5.0' }
+      });
+      res.setHeader('Content-Type', response.headers['content-type'] || 'application/octet-stream');
+      response.data.pipe(res);
+    } catch (error) {
+       console.error('[Generic] Error:', error.message);
+       res.status(502).send('Error fetching the file. The server may be blocking the proxy.');
     }
   }
 });
@@ -87,4 +95,3 @@ app.get('/proxy', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
 });
-
