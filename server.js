@@ -1,5 +1,5 @@
 // FILE: server.js
-// Final version with official GoFile API support
+// Final version with robust error handling for the GoFile API.
 
 const express = require('express');
 const axios = require('axios');
@@ -10,13 +10,16 @@ const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 
-// Get the GoFile Token from the environment variables for security
+// Get the GoFile Token from the environment variables for security.
+// Make sure this is set in your Render dashboard!
 const GOFILE_TOKEN = process.env.GOFILE_TOKEN;
 
+// A simple endpoint to check if the server is running
 app.get('/', (req, res) => {
   res.send('WellPlayer Smart Unzipper API is running!');
 });
 
+// The main proxy endpoint
 app.get('/proxy', async (req, res) => {
   const targetUrl = req.query.url;
 
@@ -27,26 +30,30 @@ app.get('/proxy', async (req, res) => {
   // --- GoFile Specific Logic ---
   if (targetUrl.includes('gofile.io/d/')) {
     if (!GOFILE_TOKEN) {
-        return res.status(500).send('GoFile API token is not configured on the server.');
+        console.error("[GoFile] Server is missing the GOFILE_TOKEN environment variable.");
+        return res.status(500).send('Server configuration error: GoFile API token is not set.');
     }
 
     const contentId = targetUrl.split('/').pop();
     console.log(`[GoFile] Detected GoFile link. Content ID: ${contentId}`);
 
     try {
-      // 1. Call the GoFile API to get the file details
+      // Step 1: Call the GoFile API to get the file details.
       const apiResponse = await axios.get(`https://api.gofile.io/getContent?contentId=${contentId}`, {
         headers: {
           'Authorization': `Bearer ${GOFILE_TOKEN}`
         }
       });
 
+      // Step 1a: Check if the API call was successful.
       if (apiResponse.data.status !== 'ok') {
-        throw new Error(apiResponse.data.data.message || 'GoFile API returned an error.');
+        // This handles errors like "Content not found" or "Invalid token".
+        const errorMessage = apiResponse.data.data.message || 'GoFile API returned an unknown error.';
+        console.error(`[GoFile] API Error: ${errorMessage}`);
+        throw new Error(`GoFile says: ${errorMessage}`);
       }
       
-      // 2. Find the direct download link from the response
-      // We need to get the 'directLink' for the specific file inside the folder
+      // Step 2: Find the direct download link from the response.
       const contents = apiResponse.data.data.contents;
       const firstFileKey = Object.keys(contents)[0];
       const directLink = contents[firstFileKey].directLink;
@@ -55,38 +62,41 @@ app.get('/proxy', async (req, res) => {
         throw new Error('Could not find a direct download link in the GoFile API response.');
       }
       
-      console.log(`[GoFile] Found direct link: ${directLink}`);
+      console.log(`[GoFile] Found direct link. Attempting to stream: ${directLink}`);
 
-      // 3. Fetch the file from the direct link
+      // Step 3: Fetch the file from the direct link.
       const fileResponse = await axios({
         method: 'get',
         url: directLink,
         responseType: 'stream',
-        headers: { 'User-Agent': 'Mozilla/5.0' }
+        headers: { 
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
+        }
       });
 
+      // Step 3a: Stream the file back to the user.
+      console.log(`[GoFile] Streaming file to user.`);
       res.setHeader('Content-Type', fileResponse.headers['content-type'] || 'application/zip');
       fileResponse.data.pipe(res);
 
     } catch (error) {
-      console.error('[GoFile] Error:', error.message);
+      // This will catch any error from the try block, including the 404 from GoFile.
+      console.error('[GoFile] Proxy failed:', error.message);
       res.status(502).send(`Error processing GoFile link: ${error.message}`);
     }
 
   } else {
-    // --- Fallback for other generic URLs ---
+    // Fallback for other generic URLs (less reliable).
     console.log(`[Generic] Attempting to proxy: ${targetUrl}`);
     try {
       const response = await axios({
         method: 'get',
         url: targetUrl,
-        responseType: 'stream',
-        headers: { 'User-Agent': 'Mozilla/5.0' }
+        responseType: 'stream'
       });
-      res.setHeader('Content-Type', response.headers['content-type'] || 'application/octet-stream');
       response.data.pipe(res);
     } catch (error) {
-       console.error('[Generic] Error:', error.message);
+       console.error('[Generic] Proxy failed:', error.message);
        res.status(502).send('Error fetching the file. The server may be blocking the proxy.');
     }
   }
