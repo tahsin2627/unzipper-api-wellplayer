@@ -8,7 +8,6 @@ const cors = require('cors');
 const app = express();
 const PORT = process.env.PORT || 3000; 
 
-// Allow requests from your Netlify app and for local testing
 app.use(cors());
 
 // A simple endpoint to check if the server is running
@@ -66,10 +65,26 @@ app.get('/proxy', async (req, res) => {
 
   } catch (error) {
     console.error(`[${new Date().toISOString()}] - Proxy Error: ${error.message}`);
-    res.status(502).send(`Error fetching the file via proxy. The target server may be blocking the request or the URL is invalid.`);
+    if (error.response) {
+      // The request was made and the server responded with a status code
+      // that falls out of the range of 2xx
+      console.error('Error Data:', error.response.data);
+      console.error('Error Status:', error.response.status);
+      console.error('Error Headers:', error.response.headers);
+      res.status(error.response.status).send(`Target server responded with error: ${error.response.status}`);
+    } else if (error.request) {
+      // The request was made but no response was received
+      console.error('Error Request:', error.request);
+      res.status(504).send('No response received from target server. It may be down or blocking the proxy.');
+    } else {
+      // Something happened in setting up the request that triggered an Error
+      console.error('Error Message:', error.message);
+      res.status(500).send(`Error setting up the request: ${error.message}`);
+    }
   }
 });
 
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
 });
+
